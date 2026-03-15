@@ -3,3 +3,4 @@ budget.txt
 categories.txt
 __pycache__/
 venv/
+credentials.json

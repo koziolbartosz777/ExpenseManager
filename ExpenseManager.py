@@ -1,82 +1,98 @@
-import csv
-import os
+import flet as ft
 from datetime import datetime
-import customtkinter as ctk
-from tkinter import messagebox
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+# import matplotlib.pyplot as plt
+# from flet.matplotlib_chart import MatplotlibChart
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
-# --- FILE PATHS ---
-base_url = r"C:\Users\bkozi\Desktop\Nauka\PYTHON BARTEK\ExpenseManager\expenses.csv"
-budget_url = r"C:\Users\bkozi\Desktop\Nauka\PYTHON BARTEK\ExpenseManager\budget.txt"
-categories_url = r"C:\Users\bkozi\Desktop\Nauka\PYTHON BARTEK\ExpenseManager\categories.txt"
+# --- CONFIGURATION ---
+CREDENTIALS_FILE = "credentials.json"
+SHEET_NAME = "ExpenseManagerSpreadsheet"
 
 # EXTENDED ENGLISH CATEGORIES
 DEFAULT_CATEGORIES = [
-    "Housing", "Utilities", "Groceries", "Dining Out", "Transport", 
-    "Healthcare", "Personal Care", "Education", "Subscriptions", 
-    "Entertainment", "Clothing", "Pets", "Home Supplies", 
+    "Housing", "Utilities", "Groceries", "Dining Out", "Transport",
+    "Healthcare", "Personal Care", "Education", "Subscriptions",
+    "Entertainment", "Clothing", "Pets", "Home Supplies",
     "Investments", "Vacation", "Gifts", "Other"
 ]
 
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+# --- DESKTOP UI CONSTANTS ---
+PAGE_PADDING = 24
+CARD_MAX_WIDTH = 520
+LIST_MAX_WIDTH = 680
+CARD_PADDING = 28
+SECTION_SPACING = 20
+FIELD_SPACING = 16
 
-# Plot style for Dark Mode
-plt.style.use('dark_background')
+def _card(content, width=None):
+    """Wrap content in a centered card for desktop-friendly layout."""
+    w = width or CARD_MAX_WIDTH
+    return ft.Container(
+        content=content,
+        width=w,
+        padding=CARD_PADDING,
+        border_radius=12,
+        bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+        border=ft.border.all(1, ft.Colors.OUTLINE_VARIANT),
+    )
 
-class ExpenseManagerApp(ctk.CTk):
-    def __init__(self):
-        super().__init__()
+class ExpenseManagerApp:
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.page.title = "Expense Manager"
+        self.page.theme_mode = ft.ThemeMode.DARK
+        self.categories = DEFAULT_CATEGORIES
+        self.lines = []
 
-        self.title("Expense Manager")
-        self.geometry("1000x750") 
-        
-        self.initialize_files()
-        self.categories = self.load_categories()
+        # Try connecting to Google Sheets database
+        self.connect_to_sheets()
 
-        # --- MAIN GRID ---
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
-
-        # --- SIDEBAR (MENU) ---
-        self.sidebar_frame = ctk.CTkFrame(self, width=220, corner_radius=0)
-        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(8, weight=1)
-
-        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="Expense\nManager", font=ctk.CTkFont(size=22, weight="bold"))
-        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 30))
-
-        self.btn_add = ctk.CTkButton(self.sidebar_frame, text="Add Expense", command=self.show_add_frame)
-        self.btn_add.grid(row=1, column=0, padx=20, pady=10)
-
-        self.btn_manage = ctk.CTkButton(self.sidebar_frame, text="Manage", command=self.show_manage_frame)
-        self.btn_manage.grid(row=2, column=0, padx=20, pady=10)
-
-        self.btn_search = ctk.CTkButton(self.sidebar_frame, text="Search", command=self.show_search_frame)
-        self.btn_search.grid(row=3, column=0, padx=20, pady=10)
-
-        self.btn_summary = ctk.CTkButton(self.sidebar_frame, text="Summary", command=self.show_summary_frame)
-        self.btn_summary.grid(row=4, column=0, padx=20, pady=10)
-
-        self.btn_analytics = ctk.CTkButton(self.sidebar_frame, text="Analytics", command=self.show_analytics_frame)
-        self.btn_analytics.grid(row=5, column=0, padx=20, pady=10)
-
-        self.btn_settlements = ctk.CTkButton(self.sidebar_frame, text="Settlements", command=self.show_settlements_frame)
-        self.btn_settlements.grid(row=6, column=0, padx=20, pady=10)
-
-        self.btn_budget = ctk.CTkButton(self.sidebar_frame, text="Budget", command=self.show_budget_frame)
-        self.btn_budget.grid(row=7, column=0, padx=20, pady=10)
+        # --- NAVIGATION BAR (desktop & mobile) ---
+        self.page.navigation_bar = ft.NavigationBar(
+            selected_index=0,
+            on_change=self.handle_nav_change,
+            elevation=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+            indicator_color=ft.Colors.PRIMARY_CONTAINER,
+            destinations=[
+                ft.NavigationBarDestination(icon=ft.Icons.ADD, label="Add"),
+                ft.NavigationBarDestination(icon=ft.Icons.EDIT, label="Manage"),
+                ft.NavigationBarDestination(icon=ft.Icons.SEARCH, label="Search"),
+                ft.NavigationBarDestination(icon=ft.Icons.ARTICLE, label="Summary"),
+                ft.NavigationBarDestination(icon=ft.Icons.PIE_CHART, label="Analytics"),
+                ft.NavigationBarDestination(icon=ft.Icons.ACCOUNT_BALANCE, label="Settles"),
+                ft.NavigationBarDestination(icon=ft.Icons.SAVINGS, label="Budget"),
+            ]
+        )
 
         # --- MAIN FRAMES ---
-        self.add_frame = ctk.CTkFrame(self, corner_radius=10)
-        self.manage_frame = ctk.CTkFrame(self, corner_radius=10)
-        self.search_frame = ctk.CTkFrame(self, corner_radius=10)
-        self.summary_frame = ctk.CTkFrame(self, corner_radius=10)
-        self.analytics_frame = ctk.CTkFrame(self, corner_radius=10)
-        self.settlements_frame = ctk.CTkFrame(self, corner_radius=10)
-        self.budget_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.add_frame = ft.Container(visible=False, expand=True)
+        self.manage_frame = ft.Container(visible=False, expand=True)
+        self.search_frame = ft.Container(visible=False, expand=True)
+        self.summary_frame = ft.Container(visible=False, expand=True)
+        self.analytics_frame = ft.Container(visible=False, expand=True)
+        self.settlements_frame = ft.Container(visible=False, expand=True)
+        self.budget_frame = ft.Container(visible=False, expand=True)
 
+        self.main_content = ft.Container(
+            content=ft.Column(
+                controls=[
+                    self.add_frame, self.manage_frame, self.search_frame,
+                    self.summary_frame, self.analytics_frame,
+                    self.settlements_frame, self.budget_frame
+                ],
+                expand=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            padding=PAGE_PADDING,
+            expand=True,
+            alignment=ft.Alignment.TOP_CENTER,
+        )
+        self.page.add(self.main_content)
+
+        # Initialize all views
         self.setup_add_frame()
         self.setup_manage_frame()
         self.setup_search_frame()
@@ -85,330 +101,495 @@ class ExpenseManagerApp(ctk.CTk):
         self.setup_settlements_frame()
         self.setup_budget_frame()
 
+        # Show default view
         self.show_add_frame()
 
-    def destroy(self):
-        # This function is called when the window is closed
-        # First close all matplotlib plots to clear memory
-        plt.close('all')
-        # Then destroy the main window
-        super().destroy()
-
     # ==========================================
-    # FILE LOGIC
+    # GOOGLE SHEETS LOGIC
     # ==========================================
-    def initialize_files(self):
-        # Create folder if it doesn't exist
-        folder = os.path.dirname(base_url)
-        if not os.path.exists(folder):
-            os.makedirs(folder)
-        
-        # Initialize CSV file with headers if it's new or empty
-        if not os.path.exists(base_url) or os.stat(base_url).st_size == 0:
-            with open(base_url, 'w', newline='', encoding='utf-8') as file:
-                writer = csv.writer(file)
-                writer.writerow(["Date", "Category", "Description", "Amount", "Payer", "Shared"])
+    def connect_to_sheets(self):
+        try:
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+            client = gspread.authorize(creds)
+            self.spreadsheet = client.open(SHEET_NAME)
+            
+            # Setup Expenses sheet
+            self.expenses_sheet = self.spreadsheet.sheet1
+            if not self.expenses_sheet.get_all_values():
+                self.expenses_sheet.append_row(["Date", "Category", "Description", "Amount", "Payer", "Shared"])
 
-    def load_categories(self):
-        # Create categories file if missing
-        if not os.path.exists(categories_url):
-            with open(categories_url, 'w', encoding='utf-8') as f:
-                for category in DEFAULT_CATEGORIES:
-                    f.write(category + "\n")
-            return DEFAULT_CATEGORIES.copy()
-        
-        # Load existing categories
-        with open(categories_url, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip()]
+            # Setup Budget sheet (creates a new tab in your Google Sheet)
+            try:
+                self.budget_sheet = self.spreadsheet.worksheet("Budget")
+            except gspread.exceptions.WorksheetNotFound:
+                self.budget_sheet = self.spreadsheet.add_worksheet("Budget", rows=10, cols=2)
+                self.budget_sheet.update_acell("A1", "Budget Limit")
+                self.budget_sheet.update_acell("B1", "")
+
+        except Exception as e:
+            self.show_message(f"Failed to connect to Google Sheets! Make sure credentials.json is configured.", is_error=True)
+
+    def read_sheet_lines(self):
+        try:
+            return self.expenses_sheet.get_all_records()
+        except Exception:
+            return []
 
     def get_budget(self):
-        # Read budget limit from file
-        if os.path.exists(budget_url):
-            with open(budget_url, 'r') as file:
-                content = file.read().strip()
-                if content:
-                    return float(content)
+        try:
+            val = self.budget_sheet.acell("B1").value
+            if val:
+                return float(val)
+        except Exception:
+            pass
         return None
 
-    def read_csv_lines(self):
-        # Helper to read all expenses as a list of dictionaries
-        if not os.path.exists(base_url): return []
-        with open(base_url, 'r', encoding='utf-8') as file:
-            return list(csv.DictReader(file))
+    def show_message(self, message, is_error=False):
+        color = ft.Colors.RED_700 if is_error else ft.Colors.GREEN_700
+        self.page.snack_bar = ft.SnackBar(ft.Text(message), bgcolor=color)
+        self.page.snack_bar.open = True
+        self.page.update()
 
     # ==========================================
     # VIEW SWITCHING
     # ==========================================
     def hide_all_frames(self):
-        # Hide all main content frames
-        for frame in [self.add_frame, self.manage_frame, self.search_frame, self.summary_frame, self.analytics_frame, self.settlements_frame, self.budget_frame]:
-            frame.grid_forget()
+        self.add_frame.visible = False
+        self.manage_frame.visible = False
+        self.search_frame.visible = False
+        self.summary_frame.visible = False
+        self.analytics_frame.visible = False
+        self.settlements_frame.visible = False
+        self.budget_frame.visible = False
+
+    def handle_nav_change(self, e):
+        idx = e.control.selected_index
+        if idx == 0: self.show_add_frame()
+        elif idx == 1: self.show_manage_frame()
+        elif idx == 2: self.show_search_frame()
+        elif idx == 3: self.show_summary_frame()
+        elif idx == 4: self.show_analytics_frame()
+        elif idx == 5: self.show_settlements_frame()
+        elif idx == 6: self.show_budget_frame()
 
     def show_add_frame(self):
         self.hide_all_frames()
-        self.add_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.add_frame.visible = True
+        self.page.update()
 
     def show_manage_frame(self):
         self.hide_all_frames()
-        self.manage_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.manage_frame.visible = True
         self.refresh_manage_list()
+        self.page.update()
 
     def show_search_frame(self):
         self.hide_all_frames()
-        self.search_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.search_frame.visible = True
+        self.page.update()
 
     def show_summary_frame(self):
         self.hide_all_frames()
-        self.summary_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.summary_frame.visible = True
         self.update_month_list()
+        self.page.update()
 
     def show_analytics_frame(self):
         self.hide_all_frames()
-        self.analytics_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
-        # Refresh chart when entering the tab
+        self.analytics_frame.visible = True
         self.draw_chart()
+        self.page.update()
 
     def show_settlements_frame(self):
         self.hide_all_frames()
-        self.settlements_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.settlements_frame.visible = True
         self.generate_settlements()
+        self.page.update()
 
     def show_budget_frame(self):
         self.hide_all_frames()
-        self.budget_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
+        self.budget_frame.visible = True
         self.refresh_budget_view()
+        self.page.update()
 
     # ==========================================
     # 1. ADD EXPENSE
     # ==========================================
     def setup_add_frame(self):
-        ctk.CTkLabel(self.add_frame, text="Add New Expense", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 20))
-        
-        self.date_entry = ctk.CTkEntry(self.add_frame, placeholder_text="Date (YYYY-MM-DD)", width=300)
-        self.date_entry.insert(0, datetime.now().strftime("%Y-%m-%d"))
-        self.date_entry.pack(pady=10)
-        
-        self.category_var = ctk.StringVar(value=self.categories[0])
-        self.category_menu = ctk.CTkOptionMenu(self.add_frame, values=self.categories, variable=self.category_var, width=300)
-        self.category_menu.pack(pady=10)
-        
-        self.desc_entry = ctk.CTkEntry(self.add_frame, placeholder_text="Description (e.g., Walmart)", width=300)
-        self.desc_entry.pack(pady=10)
-        
-        self.amount_entry = ctk.CTkEntry(self.add_frame, placeholder_text="Amount (e.g., 25.50)", width=300)
-        self.amount_entry.pack(pady=10)
-        
-        self.payer_var = ctk.StringVar(value="Bartek")
-        self.payer_menu = ctk.CTkOptionMenu(self.add_frame, values=["Bartek", "Karolina"], variable=self.payer_var, width=300)
-        self.payer_menu.pack(pady=10)
-        
-        self.shared_var = ctk.StringVar(value="False")
-        self.shared_switch = ctk.CTkSwitch(self.add_frame, text="Shared Expense?", variable=self.shared_var, onvalue="True", offvalue="False")
-        self.shared_switch.pack(pady=10)
-        
-        self.btn_save = ctk.CTkButton(self.add_frame, text="Save Expense", command=self.save_expense, width=300, fg_color="#28a745", hover_color="#218838")
-        self.btn_save.pack(pady=30)
+        self.date_entry = ft.TextField(
+            label="Date (YYYY-MM-DD)", value=datetime.now().strftime("%Y-%m-%d"),
+            expand=True, border_radius=8
+        )
+        self.category_menu = ft.Dropdown(
+            label="Category",
+            options=[ft.dropdown.Option(c) for c in self.categories],
+            value=self.categories[0],
+            expand=True, border_radius=8
+        )
+        self.desc_entry = ft.TextField(
+            label="Description (e.g. Walmart)", expand=True, border_radius=8
+        )
+        self.amount_entry = ft.TextField(
+            label="Amount (e.g. 25.50)", expand=True, border_radius=8
+        )
+        self.payer_menu = ft.Dropdown(
+            label="Payer",
+            options=[ft.dropdown.Option("Bartek"), ft.dropdown.Option("Karolina")],
+            value="Bartek",
+            expand=True, border_radius=8
+        )
+        self.shared_switch = ft.Switch(label="Shared expense?", value=False)
+        self.btn_save = ft.ElevatedButton(
+            "Save expense",
+            on_click=self.save_expense,
+            expand=True,
+            height=48,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+            bgcolor=ft.Colors.BLUE_700,
+            color=ft.Colors.WHITE,
+        )
+        form_col = ft.Column(
+            controls=[
+                ft.Text("Add new expense", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(height=8),
+                self.date_entry,
+                ft.Container(height=FIELD_SPACING),
+                self.category_menu,
+                ft.Container(height=FIELD_SPACING),
+                self.desc_entry,
+                ft.Container(height=FIELD_SPACING),
+                self.amount_entry,
+                ft.Container(height=FIELD_SPACING),
+                self.payer_menu,
+                ft.Container(height=FIELD_SPACING),
+                self.shared_switch,
+                ft.Container(height=SECTION_SPACING),
+                self.btn_save,
+            ],
+            spacing=0,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            width=CARD_MAX_WIDTH,
+        )
+        self.add_frame.content = _card(form_col)
 
-    def save_expense(self):
-        date = self.date_entry.get().strip()
-        category = self.category_var.get()
-        desc = self.desc_entry.get().strip()
-        amount_str = self.amount_entry.get().replace(",", ".")
-        payer = self.payer_var.get()
-        is_shared = self.shared_var.get()
+    def save_expense(self, e):
+        date = (self.date_entry.value or "").strip()
+        category = self.category_menu.value
+        desc = (self.desc_entry.value or "").strip()
+        amount_str = (self.amount_entry.value or "").replace(",", ".")
+        payer = self.payer_menu.value
+        is_shared = self.shared_switch.value
 
-        # Validate date format
         try:
             datetime.strptime(date, "%Y-%m-%d")
-        except:
-            return messagebox.showerror("Error", "Invalid date format. Please use YYYY-MM-DD.")
+        except ValueError:
+            return self.show_message("Invalid date format. Please use YYYY-MM-DD.", is_error=True)
         
-        # Check description
         if not desc:
-            return messagebox.showerror("Error", "Description cannot be empty!")
+            return self.show_message("Description cannot be empty!", is_error=True)
         
-        # Validate amount
         try:
             amount = float(amount_str)
-        except:
-            return messagebox.showerror("Error", "Amount must be a number!")
+        except ValueError:
+            return self.show_message("Amount must be a number!", is_error=True)
 
-        # Save to file
-        with open(base_url, 'a', newline='', encoding='utf-8') as file:
-            csv.writer(file).writerow([date, category, desc, amount, payer, is_shared])
-        
-        messagebox.showinfo("Success", "Expense saved successfully!")
-        self.desc_entry.delete(0, 'end')
-        self.amount_entry.delete(0, 'end')
+        try:
+            row = [date, category, desc, amount, payer, str(is_shared)]
+            self.expenses_sheet.append_row(row)
+            self.show_message("Expense saved to cloud successfully!")
+            self.desc_entry.value = ""
+            self.amount_entry.value = ""
+            self.page.update()
+        except Exception as ex:
+            self.show_message(f"Error saving to cloud: {ex}", is_error=True)
 
     # ==========================================
     # 2. MANAGE (DELETE / EDIT)
     # ==========================================
     def setup_manage_frame(self):
-        ctk.CTkLabel(self.manage_frame, text="Manage Expenses", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 10))
-        self.scrollable_manage_frame = ctk.CTkScrollableFrame(self.manage_frame, width=600, height=450)
-        self.scrollable_manage_frame.pack(pady=10, padx=20, fill="both", expand=True)
+        self.manage_list_col = ft.Column(scroll=ft.ScrollMode.AUTO, expand=True, spacing=8)
+        header = ft.Row(
+            controls=[ft.Text("Manage expenses", size=26, weight=ft.FontWeight.BOLD)],
+            alignment=ft.MainAxisAlignment.CENTER,
+        )
+        inner = ft.Column(
+            controls=[header, ft.Container(height=16), self.manage_list_col],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            width=LIST_MAX_WIDTH,
+        )
+        self.manage_frame.content = _card(inner, width=LIST_MAX_WIDTH)
 
     def refresh_manage_list(self):
-        # Clear current list widgets
-        for widget in self.scrollable_manage_frame.winfo_children(): widget.destroy()
-        self.lines = self.read_csv_lines()
+        self.manage_list_col.controls.clear()
+        self.lines = self.read_sheet_lines()
 
-        # Show expenses in reverse order (newest on top)
+        if not self.lines:
+            self.manage_list_col.controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        "No expenses yet. Add some in the Add tab.",
+                        color=ft.Colors.GREY_500,
+                        size=16,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    alignment=ft.Alignment.CENTER,
+                    padding=32,
+                )
+            )
+            self.page.update()
+            return
+
         for index, row in reversed(list(enumerate(self.lines))):
-            row_frame = ctk.CTkFrame(self.scrollable_manage_frame)
-            row_frame.pack(fill="x", pady=2, padx=5)
+            is_shared = str(row.get("Shared")) == "True"
+            
+            badge = ft.Container(
+                content=ft.Text("Shared" if is_shared else "Private", color=ft.Colors.WHITE, size=12),
+                bgcolor=ft.Colors.GREEN_700 if is_shared else ft.Colors.AMBER_700,
+                border_radius=5,
+                padding=ft.padding.symmetric(horizontal=6, vertical=2)
+            )
 
-            text_info = f"{row['Date']} | {row['Category']} | {row['Amount']} PLN | {row['Payer']}  "
-            ctk.CTkLabel(row_frame, text=text_info, anchor="w").pack(side="left", padx=(10, 0), pady=5)
+            row_text = f"{row['Date']} | {row['Category']} | {row['Amount']} PLN | {row['Payer']}"
 
-            # Labels for Shared vs Private status
-            is_shared = row.get("Shared") == "True"
-            tag_text = " Shared " if is_shared else " Private "
-            tag_bg_color = "#198754" if is_shared else "#ffc107" 
-            tag_text_color = "white" if is_shared else "black"
-
-            ctk.CTkLabel(row_frame, text=tag_text, fg_color=tag_bg_color, text_color=tag_text_color, corner_radius=6, height=22).pack(side="left", padx=5, pady=5)
-
-            # Delete and Edit buttons
-            ctk.CTkButton(row_frame, text="Delete", width=60, fg_color="#dc3545", hover_color="#c82333", command=lambda i=index: self.delete_expense(i)).pack(side="right", padx=5, pady=5)
-            ctk.CTkButton(row_frame, text="Edit", width=60, fg_color="#007bff", hover_color="#0056b3", command=lambda i=index: self.open_edit_window(i)).pack(side="right", padx=5, pady=5)
+            row_ui = ft.Container(
+                content=ft.Row([
+                    ft.Column([
+                        ft.Text(row_text, weight=ft.FontWeight.W_500),
+                        badge
+                    ], expand=True),
+                    ft.IconButton(icon=ft.Icons.EDIT, icon_color=ft.Colors.BLUE, on_click=lambda e, i=index: self.open_edit_window(i)),
+                    ft.IconButton(icon=ft.Icons.DELETE, icon_color=ft.Colors.RED, on_click=lambda e, i=index: self.delete_expense(i))
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                padding=10,
+                border=ft.border.all(1, ft.Colors.OUTLINE),
+                border_radius=8,
+                margin=ft.margin.only(bottom=5)
+            )
+            self.manage_list_col.controls.append(row_ui)
+        self.page.update()
 
     def delete_expense(self, index):
-        if messagebox.askyesno("Confirm", "Are you sure you want to delete this expense?"):
-            self.lines.pop(index)
-            self.save_all_lines()
-            self.refresh_manage_list()
+        self.lines.pop(index)
+        self.save_all_lines()
+        self.refresh_manage_list()
+        self.show_message("Expense deleted.")
 
     def open_edit_window(self, index):
         expense = self.lines[index]
-        edit_window = ctk.CTkToplevel(self)
-        edit_window.title("Edit Expense")
-        edit_window.geometry("300x300")
-        edit_window.attributes('-topmost', True)
+        
+        edit_date = ft.TextField(label="Date", value=expense["Date"])
+        edit_amount = ft.TextField(label="Amount", value=str(expense["Amount"]))
+        edit_desc = ft.TextField(label="Description", value=expense["Description"])
 
-        entry_date = ctk.CTkEntry(edit_window, width=200); entry_date.insert(0, expense["Date"]); entry_date.pack(pady=5)
-        entry_amount = ctk.CTkEntry(edit_window, width=200); entry_amount.insert(0, expense["Amount"]); entry_amount.pack(pady=5)
-        entry_desc = ctk.CTkEntry(edit_window, width=200); entry_desc.insert(0, expense["Description"]); entry_desc.pack(pady=5)
-
-        def save_edits():
+        def save_edits(e):
             try:
-                float(entry_amount.get().replace(",", "."))
-            except:
-                return messagebox.showerror("Error", "Amount must be a number!")
+                float(edit_amount.value.replace(",", "."))
+            except ValueError:
+                self.show_message("Amount must be a number!", is_error=True)
+                return
             
             self.lines[index].update({
-                "Date": entry_date.get(), 
-                "Amount": entry_amount.get().replace(",", "."), 
-                "Description": entry_desc.get()
+                "Date": edit_date.value, 
+                "Amount": edit_amount.value.replace(",", "."), 
+                "Description": edit_desc.value
             })
             self.save_all_lines()
-            edit_window.destroy()
+            self.page.dialog.open = False
             self.refresh_manage_list()
+            self.show_message("Expense updated!")
 
-        ctk.CTkButton(edit_window, text="Save Changes", command=save_edits).pack(pady=20)
+        def cancel_edits(e):
+            self.page.dialog.open = False
+            self.page.update()
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Edit Expense"),
+            content=ft.Column([edit_date, edit_amount, edit_desc], tight=True),
+            actions=[
+                ft.TextButton("Cancel", on_click=cancel_edits),
+                ft.TextButton("Save Changes", on_click=save_edits)
+            ]
+        )
+        self.page.dialog = dlg
+        dlg.open = True
+        self.page.update()
 
     def save_all_lines(self):
-        # Overwrite file with current data
-        with open(base_url, 'w', newline='', encoding='utf-8') as file:
-            writer = csv.DictWriter(file, fieldnames=["Date", "Category", "Description", "Amount", "Payer", "Shared"])
-            writer.writeheader()
-            writer.writerows(self.lines)
+        # We overwrite the whole sheet to mirror the safe CSV logic
+        try:
+            self.expenses_sheet.clear()
+            headers = ["Date", "Category", "Description", "Amount", "Payer", "Shared"]
+            data_to_upload = [headers]
+            
+            for row in self.lines:
+                data_to_upload.append([
+                    str(row.get("Date", "")),
+                    str(row.get("Category", "")),
+                    str(row.get("Description", "")),
+                    str(row.get("Amount", "")),
+                    str(row.get("Payer", "")),
+                    str(row.get("Shared", ""))
+                ])
+                
+            self.expenses_sheet.append_rows(data_to_upload)
+        except Exception as e:
+            self.show_message(f"Sync error: {e}", is_error=True)
 
     # ==========================================
     # 3. SEARCH
     # ==========================================
     def setup_search_frame(self):
-        ctk.CTkLabel(self.search_frame, text="Search Expenses", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 10))
-        
-        search_top_frame = ctk.CTkFrame(self.search_frame, fg_color="transparent")
-        search_top_frame.pack(pady=10)
+        self.search_entry = ft.TextField(
+            label="Search by keyword…", expand=True, border_radius=8
+        )
+        btn_search = ft.ElevatedButton(
+            "Search",
+            on_click=self.perform_search,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+            height=48,
+        )
+        self.search_results_col = ft.Column(
+            scroll=ft.ScrollMode.AUTO, expand=True, spacing=8
+        )
+        search_row = ft.Row(
+            [self.search_entry, btn_search],
+            spacing=12,
+            alignment=ft.MainAxisAlignment.CENTER,
+            wrap=True,
+        )
+        inner = ft.Column(
+            controls=[
+                ft.Text("Search expenses", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(height=16),
+                search_row,
+                ft.Container(height=20),
+                self.search_results_col,
+            ],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            width=LIST_MAX_WIDTH,
+        )
+        self.search_frame.content = _card(inner, width=LIST_MAX_WIDTH)
 
-        self.search_entry = ctk.CTkEntry(search_top_frame, placeholder_text="Type keyword...", width=300)
-        self.search_entry.pack(side="left", padx=10)
+    def perform_search(self, e=None):
+        self.search_results_col.controls.clear()
+        keyword = (self.search_entry.value or "").lower()
+        if not keyword: 
+            self.page.update()
+            return
 
-        ctk.CTkButton(search_top_frame, text="Search", command=self.perform_search).pack(side="left")
-
-        self.search_results_frame = ctk.CTkScrollableFrame(self.search_frame, width=600, height=400)
-        self.search_results_frame.pack(pady=10, padx=20, fill="both", expand=True)
-
-    def perform_search(self):
-        for widget in self.search_results_frame.winfo_children(): widget.destroy()
-        keyword = self.search_entry.get().lower()
-        if not keyword: return
-
-        lines = self.read_csv_lines()
+        lines = self.read_sheet_lines()
         found = False
 
         for row in reversed(lines):
-            # Check if keyword matches description, category or amount
-            if keyword in row["Description"].lower() or keyword in row["Category"].lower() or keyword in row["Amount"]:
+            if keyword in str(row.get("Description", "")).lower() or \
+               keyword in str(row.get("Category", "")).lower() or \
+               keyword in str(row.get("Amount", "")):
+                
                 found = True
-                row_frame = ctk.CTkFrame(self.search_results_frame)
-                row_frame.pack(fill="x", pady=2, padx=5)
+                is_shared = str(row.get("Shared")) == "True"
+                badge_color = ft.Colors.GREEN_700 if is_shared else ft.Colors.AMBER_700
+                tag_text = "Shared" if is_shared else "Private"
 
-                is_shared = row.get("Shared") == "True"
-                tag_text = " Shared " if is_shared else " Private "
-                tag_bg = "#198754" if is_shared else "#ffc107"
-                tag_fg = "white" if is_shared else "black"
+                badge = ft.Container(
+                    content=ft.Text(tag_text, color=ft.Colors.WHITE, size=12),
+                    bgcolor=badge_color,
+                    border_radius=5,
+                    padding=ft.padding.symmetric(horizontal=6, vertical=2)
+                )
 
-                text_info = f"{row['Date']} | {row['Category']} | {row['Amount']} PLN | {row['Description']} "
-                ctk.CTkLabel(row_frame, text=text_info, anchor="w").pack(side="left", padx=(10, 5), pady=5)
-                ctk.CTkLabel(row_frame, text=tag_text, fg_color=tag_bg, text_color=tag_fg, corner_radius=6, height=22).pack(side="left", padx=5)
+                row_text = f"{row['Date']} | {row['Category']} | {row['Amount']} PLN | {row['Description']}"
+                
+                ui_row = ft.Container(
+                    content=ft.Row([ft.Text(row_text, expand=True), badge]),
+                    padding=10,
+                    border=ft.border.all(1, ft.Colors.OUTLINE),
+                    border_radius=8,
+                    margin=ft.margin.only(bottom=5)
+                )
+                self.search_results_col.controls.append(ui_row)
 
         if not found:
-            ctk.CTkLabel(self.search_results_frame, text="No results found.", text_color="gray").pack(pady=20)
-
+            self.search_results_col.controls.append(
+                ft.Container(
+                    content=ft.Text("No results found.", color=ft.Colors.GREY_500, size=16),
+                    alignment=ft.Alignment.CENTER,
+                    padding=32,
+                )
+            )
+        
+        self.page.update()
 
     # ==========================================
     # 4. SUMMARY
     # ==========================================
     def setup_summary_frame(self):
-        ctk.CTkLabel(self.summary_frame, text="Monthly Summary", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 10))
-        
-        self.month_var = ctk.StringVar(value="All")
-        self.month_menu = ctk.CTkOptionMenu(self.summary_frame, values=["All"], variable=self.month_var, command=self.generate_summary)
-        self.month_menu.pack(pady=10)
-        
-        self.summary_text = ctk.CTkTextbox(self.summary_frame, width=600, height=400)
-        self.summary_text.pack(pady=10, padx=20, fill="both", expand=True)
+        self.month_menu = ft.Dropdown(
+            label="Month",
+            options=[ft.dropdown.Option("All")],
+            value="All",
+            on_select=self.generate_summary,
+            expand=True,
+            border_radius=8,
+        )
+        self.summary_text = ft.TextField(
+            multiline=True,
+            read_only=True,
+            expand=True,
+            min_lines=12,
+            border_radius=8,
+            content_padding=16,
+        )
+        inner = ft.Column(
+            controls=[
+                ft.Text("Monthly summary", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(height=16),
+                self.month_menu,
+                ft.Container(height=20),
+                self.summary_text,
+            ],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            width=CARD_MAX_WIDTH,
+        )
+        self.summary_frame.content = _card(inner)
 
     def update_month_list(self):
-        # Update dropdown with months found in data
-        lines = self.read_csv_lines()
-        months = set([row["Date"][:7] for row in lines if row.get("Date")])
+        lines = self.read_sheet_lines()
+        months = set([str(row.get("Date", ""))[:7] for row in lines if row.get("Date")])
         sorted_months = ["All"] + sorted(list(months), reverse=True)
         
-        self.month_menu.configure(values=sorted_months)
-        if self.month_var.get() not in sorted_months:
-            self.month_var.set(sorted_months[0])
+        self.month_menu.options = [ft.dropdown.Option(m) for m in sorted_months]
+        if self.month_menu.value not in sorted_months:
+            self.month_menu.value = sorted_months[0]
             
         self.generate_summary()
 
-    def generate_summary(self, choice=None):
-        self.summary_text.delete("1.0", "end")
-        selected_month = self.month_var.get()
-        lines = self.read_csv_lines()
+    def generate_summary(self, e=None):
+        selected_month = self.month_menu.value
+        lines = self.read_sheet_lines()
 
         monthly_status = {"Shared": {}, "Bartek": {}, "Karolina": {}}
         month_total = 0.0
 
         for row in lines:
-            month = row["Date"][:7]
+            month = str(row.get("Date", ""))[:7]
             if selected_month != "All" and month != selected_month:
                 continue
 
             try:
                 category = row["Category"]
                 amount = float(row["Amount"])
-                section = "Shared" if row.get("Shared") == "True" else row.get("Payer", "Unknown")
+                section = "Shared" if str(row.get("Shared")) == "True" else row.get("Payer", "Unknown")
                 
                 if category not in monthly_status[section]: 
                     monthly_status[section][category] = 0
                 
                 monthly_status[section][category] += amount
                 month_total += amount
-            except: 
+            except Exception: 
                 continue
 
         report = f"REPORT FOR: {selected_month}\n"
@@ -434,138 +615,148 @@ class ExpenseManagerApp(ctk.CTk):
             else:
                 report += f"STATUS: [WARNING] OVER BUDGET BY {month_total - budget_limit:.2f} PLN!\n"
 
-        self.summary_text.insert("end", report)
+        self.summary_text.value = report
+        self.page.update()
 
     # ==========================================
     # 5. ANALYTICS (PIE CHART)
     # ==========================================
     def setup_analytics_frame(self):
-        ctk.CTkLabel(self.analytics_frame, text="Analytics (Pie Chart)", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 10))
+        self.analysis_filter = ft.SegmentedButton(
+            segments=[
+                ft.Segment(value="All", label=ft.Text("All")),
+                ft.Segment(value="Shared", label=ft.Text("Shared")),
+                ft.Segment(value="Bartek", label=ft.Text("Bartek")),
+                ft.Segment(value="Karolina", label=ft.Text("Karolina")),
+            ],
+            selected=["All"],
+            on_change=self.draw_chart,
+        )
+        self.chart_container = ft.Container(expand=True, padding=16)
 
-        # Filter switcher
-        self.analysis_filter_var = ctk.StringVar(value="All")
-        filter_seg = ctk.CTkSegmentedButton(self.analytics_frame, variable=self.analysis_filter_var, 
-                                            values=["All", "Shared", "Bartek", "Karolina"], 
-                                            command=self.draw_chart)
-        filter_seg.pack(pady=10)
+        inner = ft.Column(
+            controls=[
+                ft.Text("Analytics", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(height=16),
+                self.analysis_filter,
+                ft.Container(height=20),
+                self.chart_container,
+            ],
+            expand=True,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            width=CARD_MAX_WIDTH,
+        )
+        self.analytics_frame.content = _card(inner)
 
-        self.chart_frame = ctk.CTkFrame(self.analytics_frame, fg_color="transparent")
-        self.chart_frame.pack(fill="both", expand=True, padx=20, pady=10)
-
-    def draw_chart(self, value=None):
-        # Clear existing widgets and close plots
-        for widget in self.chart_frame.winfo_children():
-            widget.destroy()
-        plt.close('all') 
-
-        lines = self.read_csv_lines()
-        if not lines:
-            ctk.CTkLabel(self.chart_frame, text="No data to display.", font=ctk.CTkFont(size=16)).pack(pady=50)
-            return
-
-        filter_choice = self.analysis_filter_var.get()
-
-        # Filter data based on selection
-        filtered_lines = []
-        for row in lines:
-            try:
-                is_shared = row.get("Shared") == "True"
-                payer = row.get("Payer")
-                if filter_choice == "Shared" and not is_shared: continue
-                if filter_choice == "Bartek" and (is_shared or payer != "Bartek"): continue
-                if filter_choice == "Karolina" and (is_shared or payer != "Karolina"): continue
-                filtered_lines.append(row)
-            except: continue
-
-        if not filtered_lines:
-            ctk.CTkLabel(self.chart_frame, text="No data for this filter.", font=ctk.CTkFont(size=16)).pack(pady=50)
-            return
-
-        # Initialize Plot
-        fig, ax = plt.subplots(figsize=(7, 5))
-        fig.patch.set_facecolor('#2b2b2b') 
-        ax.set_facecolor('#2b2b2b')
-
-        # Aggregate sums per category
-        categories_sum = {}
-        for row in filtered_lines:
-            try:
-                cat = row["Category"]
-                amt = float(row["Amount"])
-                if cat not in categories_sum: categories_sum[cat] = 0
-                categories_sum[cat] += amt
-            except: continue
-
-        if not categories_sum:
-            ctk.CTkLabel(self.chart_frame, text="No categorized data.").pack(pady=50)
-            return
-
-        sorted_cats = sorted(categories_sum.items(), key=lambda x: x[1], reverse=True)
-        labels = [item[0] for item in sorted_cats]
-        sizes = [item[1] for item in sorted_cats]
-
-        # Draw the chart
-        ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140, 
-                textprops=dict(color="white", fontsize=11, weight="bold"))
+    def draw_chart(self, e=None):
+        # 1. Czyścimy kontener na wykres
+        self.chart_container.content = None
         
-        ax.axis('equal') 
+        # 2. Pobieramy dane z chmury
+        lines = self.read_sheet_lines()
+        
+        # 3. Hamulec bezpieczeństwa (TO ZOSTAWIAMY)
+        if not lines:
+            self.chart_container.content = ft.Text("No data to display in cloud.", size=16)
+            self.page.update()
+            return
 
-        # Display in UI
-        canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill="both", expand=True)
+        # 4. Informacja dla Ciebie, że wykresy są chwilowo wyłączone
+        self.chart_container.content = ft.Text(
+            "Pie Charts are temporarily disabled to fix import issues.\n"
+            "Your cloud data is safe! Check 'Summary' for totals.",
+            size=16, color=ft.Colors.GREY_500
+        )
+        self.page.update()
 
     # ==========================================
     # 6. SETTLEMENTS & BUDGET
     # ==========================================
     def setup_settlements_frame(self):
-        ctk.CTkLabel(self.settlements_frame, text="Who owes whom?", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 30))
-        self.settlement_label = ctk.CTkLabel(self.settlements_frame, text="", font=ctk.CTkFont(size=18))
-        self.settlement_label.pack(pady=20)
-        self.result_label = ctk.CTkLabel(self.settlements_frame, text="", font=ctk.CTkFont(size=22, weight="bold"), text_color="#ffcc00")
-        self.result_label.pack(pady=20)
+        self.settlement_label = ft.Text("", size=18)
+        self.result_label = ft.Text(
+            "", size=22, weight=ft.FontWeight.BOLD, color=ft.Colors.AMBER_400
+        )
+        inner = ft.Column(
+            controls=[
+                ft.Text("Who owes whom?", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(height=24),
+                self.settlement_label,
+                ft.Container(height=16),
+                self.result_label,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            width=CARD_MAX_WIDTH,
+        )
+        self.settlements_frame.content = _card(inner)
 
     def generate_settlements(self):
         bartek_paid, karolina_paid = 0.0, 0.0
-        for row in self.read_csv_lines():
-            if row.get("Shared") == "True":
+        for row in self.read_sheet_lines():
+            if str(row.get("Shared")) == "True":
                 try:
                     if row["Payer"] == "Bartek": bartek_paid += float(row["Amount"])
                     elif row["Payer"] == "Karolina": karolina_paid += float(row["Amount"])
-                except: continue
+                except Exception: continue
 
-        self.settlement_label.configure(text=f"Bartek paid for shared: {bartek_paid:.2f} PLN\nKarolina paid for shared: {karolina_paid:.2f} PLN")
+        self.settlement_label.value = f"Bartek paid for shared: {bartek_paid:.2f} PLN\nKarolina paid for shared: {karolina_paid:.2f} PLN"
         diff = abs(bartek_paid - karolina_paid) / 2
         
         if bartek_paid > karolina_paid: 
-            self.result_label.configure(text=f"=> Karolina owes Bartek: {diff:.2f} PLN")
+            self.result_label.value = f"=> Karolina owes Bartek: {diff:.2f} PLN"
         elif karolina_paid > bartek_paid: 
-            self.result_label.configure(text=f"=> Bartek owes Karolina: {diff:.2f} PLN")
+            self.result_label.value = f"=> Bartek owes Karolina: {diff:.2f} PLN"
         else: 
-            self.result_label.configure(text="=> You are even! (0.00 PLN)")
+            self.result_label.value = "=> You are even! (0.00 PLN)"
 
     def setup_budget_frame(self):
-        ctk.CTkLabel(self.budget_frame, text="Budget Settings", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(20, 30))
-        self.current_budget_lbl = ctk.CTkLabel(self.budget_frame, text="", font=ctk.CTkFont(size=16))
-        self.current_budget_lbl.pack(pady=10)
-        self.budget_entry = ctk.CTkEntry(self.budget_frame, placeholder_text="New limit (e.g., 3000)", width=200)
-        self.budget_entry.pack(pady=10)
-        ctk.CTkButton(self.budget_frame, text="Save Budget", command=self.save_budget, fg_color="#17a2b8", hover_color="#138496").pack(pady=20)
+        self.current_budget_lbl = ft.Text("", size=16)
+        self.budget_entry = ft.TextField(
+            label="New monthly limit (e.g. 3000)",
+            expand=True,
+            border_radius=8,
+        )
+        btn_save = ft.ElevatedButton(
+            "Save budget",
+            on_click=self.save_budget,
+            expand=True,
+            height=48,
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+            bgcolor=ft.Colors.CYAN_700,
+            color=ft.Colors.WHITE,
+        )
+        inner = ft.Column(
+            controls=[
+                ft.Text("Budget settings", size=26, weight=ft.FontWeight.BOLD),
+                ft.Container(height=24),
+                self.current_budget_lbl,
+                ft.Container(height=16),
+                self.budget_entry,
+                ft.Container(height=20),
+                btn_save,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            width=CARD_MAX_WIDTH,
+        )
+        self.budget_frame.content = _card(inner)
 
     def refresh_budget_view(self):
         limit = self.get_budget()
-        self.current_budget_lbl.configure(text=f"Current monthly budget: {limit:.2f} PLN" if limit else "You haven't set a budget yet.")
+        self.current_budget_lbl.value = f"Current monthly budget: {limit:.2f} PLN" if limit else "You haven't set a budget yet."
 
-    def save_budget(self):
+    def save_budget(self, e):
         try:
-            limit = float(self.budget_entry.get().replace(",", "."))
-            with open(budget_url, 'w') as file: file.write(str(limit))
-            messagebox.showinfo("Success", "Budget updated successfully!")
-            self.budget_entry.delete(0, 'end')
+            limit = float(self.budget_entry.value.replace(",", "."))
+            self.budget_sheet.update_acell("B1", limit)
+            self.show_message("Budget updated successfully!")
+            self.budget_entry.value = ""
             self.refresh_budget_view()
-        except: 
-            messagebox.showerror("Error", "Budget must be a number!")
+            self.page.update()
+        except Exception: 
+            self.show_message("Budget must be a number!", is_error=True)
+
+def main_app(page: ft.Page):
+    app = ExpenseManagerApp(page)
 
 if __name__ == "__main__":
-    app = ExpenseManagerApp()
-    app.mainloop()
+    ft.app(target=main_app, view=ft.AppView.WEB_BROWSER)
