@@ -1,7 +1,5 @@
 import flet as ft
 from datetime import datetime
-# import matplotlib.pyplot as plt
-# from flet.matplotlib_chart import MatplotlibChart
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -25,6 +23,14 @@ CARD_PADDING = 28
 SECTION_SPACING = 20
 FIELD_SPACING = 16
 
+# Colors for analytics bars (one per category, cycle if needed)
+CHART_COLORS = [
+    ft.Colors.BLUE_400, ft.Colors.GREEN_400, ft.Colors.AMBER_400,
+    ft.Colors.PURPLE_400, ft.Colors.CYAN_400, ft.Colors.ORANGE_400,
+    ft.Colors.PINK_400, ft.Colors.TEAL_400, ft.Colors.INDIGO_400,
+    ft.Colors.LIME_400, ft.Colors.DEEP_ORANGE_400, ft.Colors.BROWN_400,
+]
+
 def _card(content, width=None):
     """Wrap content in a centered card for desktop-friendly layout."""
     w = width or CARD_MAX_WIDTH
@@ -44,8 +50,10 @@ class ExpenseManagerApp:
         self.page.theme_mode = ft.ThemeMode.DARK
         self.categories = DEFAULT_CATEGORIES
         self.lines = []
+        self.expenses_sheet = None
+        self.budget_sheet = None
 
-        # Try connecting to Google Sheets database
+        # Connect to Google Sheets
         self.connect_to_sheets()
 
         # --- NAVIGATION BAR (desktop & mobile) ---
@@ -128,15 +136,22 @@ class ExpenseManagerApp:
                 self.budget_sheet.update_acell("B1", "")
 
         except Exception as e:
-            self.show_message(f"Failed to connect to Google Sheets! Make sure credentials.json is configured.", is_error=True)
+            self.expenses_sheet = None
+            self.budget_sheet = None
+            self.show_message(f"Failed to connect to Google Sheets. Check credentials.json and network.", is_error=True)
+            self.page.update()
 
     def read_sheet_lines(self):
+        if self.expenses_sheet is None:
+            return []
         try:
             return self.expenses_sheet.get_all_records()
         except Exception:
             return []
 
     def get_budget(self):
+        if self.budget_sheet is None:
+            return None
         try:
             val = self.budget_sheet.acell("B1").value
             if val:
@@ -147,8 +162,9 @@ class ExpenseManagerApp:
 
     def show_message(self, message, is_error=False):
         color = ft.Colors.RED_700 if is_error else ft.Colors.GREEN_700
-        self.page.snack_bar = ft.SnackBar(ft.Text(message), bgcolor=color)
-        self.page.snack_bar.open = True
+        self.page.show_dialog(
+            ft.SnackBar(content=ft.Text(str(message)), bgcolor=color)
+        )
         self.page.update()
 
     # ==========================================
@@ -274,35 +290,46 @@ class ExpenseManagerApp:
         self.add_frame.content = _card(form_col)
 
     def save_expense(self, e):
+        if self.expenses_sheet is None:
+            self.show_message("Not connected to Google Sheets. Check credentials and try again.", is_error=True)
+            self.page.update()
+            return
+
         date = (self.date_entry.value or "").strip()
-        category = self.category_menu.value
+        category = (self.category_menu.value if self.category_menu.value is not None else "") or ""
         desc = (self.desc_entry.value or "").strip()
         amount_str = (self.amount_entry.value or "").replace(",", ".")
-        payer = self.payer_menu.value
-        is_shared = self.shared_switch.value
+        payer = (self.payer_menu.value if self.payer_menu.value is not None else "") or "Bartek"
+        is_shared = bool(self.shared_switch.value)
 
         try:
             datetime.strptime(date, "%Y-%m-%d")
         except ValueError:
-            return self.show_message("Invalid date format. Please use YYYY-MM-DD.", is_error=True)
-        
+            self.show_message("Invalid date format. Use YYYY-MM-DD.", is_error=True)
+            self.page.update()
+            return
+
         if not desc:
-            return self.show_message("Description cannot be empty!", is_error=True)
-        
+            self.show_message("Description cannot be empty.", is_error=True)
+            self.page.update()
+            return
+
         try:
             amount = float(amount_str)
         except ValueError:
-            return self.show_message("Amount must be a number!", is_error=True)
+            self.show_message("Amount must be a number.", is_error=True)
+            self.page.update()
+            return
 
         try:
-            row = [date, category, desc, amount, payer, str(is_shared)]
+            row = [str(date), str(category), str(desc), amount, str(payer), str(is_shared)]
             self.expenses_sheet.append_row(row)
-            self.show_message("Expense saved to cloud successfully!")
             self.desc_entry.value = ""
             self.amount_entry.value = ""
-            self.page.update()
+            self.show_message("Expense saved successfully!")
         except Exception as ex:
             self.show_message(f"Error saving to cloud: {ex}", is_error=True)
+        self.page.update()
 
     # ==========================================
     # 2. MANAGE (DELETE / EDIT)
@@ -377,52 +404,70 @@ class ExpenseManagerApp:
         self.show_message("Expense deleted.")
 
     def open_edit_window(self, index):
+        if index < 0 or index >= len(self.lines):
+            return
         expense = self.lines[index]
-        
-        edit_date = ft.TextField(label="Date", value=expense["Date"])
-        edit_amount = ft.TextField(label="Amount", value=str(expense["Amount"]))
-        edit_desc = ft.TextField(label="Description", value=expense["Description"])
+        edit_date = ft.TextField(
+            label="Date (YYYY-MM-DD)",
+            value=str(expense.get("Date", "")),
+            width=280,
+        )
+        edit_amount = ft.TextField(
+            label="Amount",
+            value=str(expense.get("Amount", "")),
+            width=280,
+        )
+        edit_desc = ft.TextField(
+            label="Description",
+            value=str(expense.get("Description", "")),
+            width=280,
+        )
 
         def save_edits(e):
             try:
-                float(edit_amount.value.replace(",", "."))
+                float((edit_amount.value or "").replace(",", "."))
             except ValueError:
-                self.show_message("Amount must be a number!", is_error=True)
+                self.show_message("Amount must be a number.", is_error=True)
+                self.page.update()
                 return
-            
             self.lines[index].update({
-                "Date": edit_date.value, 
-                "Amount": edit_amount.value.replace(",", "."), 
-                "Description": edit_desc.value
+                "Date": (edit_date.value or "").strip(),
+                "Amount": (edit_amount.value or "").replace(",", ".").strip(),
+                "Description": (edit_desc.value or "").strip(),
             })
             self.save_all_lines()
-            self.page.dialog.open = False
+            self.page.close_dialog()
             self.refresh_manage_list()
-            self.show_message("Expense updated!")
+            self.show_message("Expense updated.")
+            self.page.update()
 
         def cancel_edits(e):
-            self.page.dialog.open = False
+            self.page.close_dialog()
             self.page.update()
 
         dlg = ft.AlertDialog(
-            title=ft.Text("Edit Expense"),
-            content=ft.Column([edit_date, edit_amount, edit_desc], tight=True),
+            title=ft.Text("Edit expense"),
+            content=ft.Column(
+                [edit_date, edit_amount, edit_desc],
+                tight=True,
+                spacing=12,
+            ),
             actions=[
                 ft.TextButton("Cancel", on_click=cancel_edits),
-                ft.TextButton("Save Changes", on_click=save_edits)
-            ]
+                ft.TextButton("Save", on_click=save_edits),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
         )
-        self.page.dialog = dlg
-        dlg.open = True
+        self.page.show_dialog(dlg)
         self.page.update()
 
     def save_all_lines(self):
-        # We overwrite the whole sheet to mirror the safe CSV logic
+        if self.expenses_sheet is None:
+            return
         try:
             self.expenses_sheet.clear()
             headers = ["Date", "Category", "Description", "Amount", "Payer", "Shared"]
             data_to_upload = [headers]
-            
             for row in self.lines:
                 data_to_upload.append([
                     str(row.get("Date", "")),
@@ -430,19 +475,22 @@ class ExpenseManagerApp:
                     str(row.get("Description", "")),
                     str(row.get("Amount", "")),
                     str(row.get("Payer", "")),
-                    str(row.get("Shared", ""))
+                    str(row.get("Shared", "")),
                 ])
-                
             self.expenses_sheet.append_rows(data_to_upload)
         except Exception as e:
             self.show_message(f"Sync error: {e}", is_error=True)
+            self.page.update()
 
     # ==========================================
     # 3. SEARCH
     # ==========================================
     def setup_search_frame(self):
         self.search_entry = ft.TextField(
-            label="Search by keyword…", expand=True, border_radius=8
+            label="Search by keyword (description, category, amount)",
+            width=400,
+            border_radius=8,
+            on_submit=lambda e: self.perform_search(e),
         )
         btn_search = ft.ElevatedButton(
             "Search",
@@ -451,20 +499,48 @@ class ExpenseManagerApp:
             height=48,
         )
         self.search_results_col = ft.Column(
-            scroll=ft.ScrollMode.AUTO, expand=True, spacing=8
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            spacing=8,
         )
-        search_row = ft.Row(
-            [self.search_entry, btn_search],
+        self.search_results_col.controls.append(
+            ft.Container(
+                content=ft.Text(
+                    "Enter a keyword above and click Search.",
+                    color=ft.Colors.GREY_500,
+                    size=15,
+                ),
+                padding=24,
+                alignment=ft.Alignment.CENTER_LEFT,
+            )
+        )
+        search_bar_row = ft.Row(
+            controls=[
+                self.search_entry,
+                btn_search,
+            ],
             spacing=12,
-            alignment=ft.MainAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.START,
             wrap=True,
+        )
+        search_section = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Text("Search expenses", size=26, weight=ft.FontWeight.BOLD),
+                    ft.Text("Find by description, category or amount.", size=14, color=ft.Colors.GREY_400),
+                    ft.Container(height=12),
+                    search_bar_row,
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.START,
+                spacing=0,
+            ),
+            padding=ft.padding.only(bottom=20),
         )
         inner = ft.Column(
             controls=[
-                ft.Text("Search expenses", size=26, weight=ft.FontWeight.BOLD),
-                ft.Container(height=16),
-                search_row,
-                ft.Container(height=20),
+                search_section,
+                ft.Text("Results", size=16, weight=ft.FontWeight.W_500),
+                ft.Container(height=8),
                 self.search_results_col,
             ],
             expand=True,
@@ -475,8 +551,15 @@ class ExpenseManagerApp:
 
     def perform_search(self, e=None):
         self.search_results_col.controls.clear()
-        keyword = (self.search_entry.value or "").lower()
-        if not keyword: 
+        keyword = (self.search_entry.value or "").strip().lower()
+        if not keyword:
+            self.search_results_col.controls.append(
+                ft.Container(
+                    content=ft.Text("Enter a keyword above and click Search.", color=ft.Colors.GREY_500, size=15),
+                    padding=24,
+                    alignment=ft.Alignment.CENTER_LEFT,
+                )
+            )
             self.page.update()
             return
 
@@ -534,21 +617,20 @@ class ExpenseManagerApp:
             expand=True,
             border_radius=8,
         )
-        self.summary_text = ft.TextField(
-            multiline=True,
-            read_only=True,
+        self.summary_content_col = ft.Column(
+            scroll=ft.ScrollMode.AUTO,
             expand=True,
-            min_lines=12,
-            border_radius=8,
-            content_padding=16,
+            spacing=16,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
         inner = ft.Column(
             controls=[
                 ft.Text("Monthly summary", size=26, weight=ft.FontWeight.BOLD),
+                ft.Text("Breakdown by shared and personal expenses.", size=14, color=ft.Colors.GREY_400),
                 ft.Container(height=16),
                 self.month_menu,
                 ft.Container(height=20),
-                self.summary_text,
+                self.summary_content_col,
             ],
             expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
@@ -567,9 +649,54 @@ class ExpenseManagerApp:
             
         self.generate_summary()
 
+    def _section_card(self, title, color, items, subtotal):
+        """One block: section title + category rows + subtotal."""
+        rows = []
+        for cat, val in sorted(items, key=lambda x: x[1], reverse=True):
+            rows.append(
+                ft.Row(
+                    controls=[
+                        ft.Text(cat, size=14, color=ft.Colors.ON_SURFACE),
+                        ft.Text(f"{val:.2f} PLN", size=14, weight=ft.FontWeight.W_500),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                )
+            )
+            rows.append(ft.Container(height=4))
+        rows.append(ft.Divider(height=1))
+        rows.append(ft.Container(height=8))
+        rows.append(
+            ft.Row(
+                controls=[
+                    ft.Text("Subtotal", size=14, weight=ft.FontWeight.BOLD),
+                    ft.Text(f"{subtotal:.2f} PLN", size=14, weight=ft.FontWeight.BOLD),
+                ],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            )
+        )
+        return ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Container(
+                        content=ft.Text(title, size=16, weight=ft.FontWeight.BOLD, color=color),
+                        padding=ft.padding.symmetric(vertical=0, horizontal=0),
+                        margin=ft.margin.only(bottom=12),
+                    ),
+                    ft.Column(controls=rows, spacing=0, horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
+                ],
+                spacing=0,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            padding=16,
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+            border=ft.border.all(1, ft.Colors.OUTLINE_VARIANT),
+        )
+
     def generate_summary(self, e=None):
-        selected_month = self.month_menu.value
+        selected_month = self.month_menu.value or "All"
         lines = self.read_sheet_lines()
+        self.summary_content_col.controls.clear()
 
         monthly_status = {"Shared": {}, "Bartek": {}, "Karolina": {}}
         month_total = 0.0
@@ -578,44 +705,79 @@ class ExpenseManagerApp:
             month = str(row.get("Date", ""))[:7]
             if selected_month != "All" and month != selected_month:
                 continue
-
             try:
-                category = row["Category"]
-                amount = float(row["Amount"])
+                category = row.get("Category", "Other")
+                amount = float(row.get("Amount", 0))
                 section = "Shared" if str(row.get("Shared")) == "True" else row.get("Payer", "Unknown")
-                
-                if category not in monthly_status[section]: 
-                    monthly_status[section][category] = 0
-                
-                monthly_status[section][category] += amount
+                if section not in monthly_status:
+                    monthly_status[section] = {}
+                monthly_status[section][category] = monthly_status[section].get(category, 0) + amount
                 month_total += amount
-            except Exception: 
+            except Exception:
                 continue
 
-        report = f"REPORT FOR: {selected_month}\n"
-        report += f"========================================\n"
-
+        section_colors = {
+            "Shared": ft.Colors.GREEN_400,
+            "Bartek": ft.Colors.BLUE_400,
+            "Karolina": ft.Colors.PURPLE_400,
+        }
         for section in ["Shared", "Bartek", "Karolina"]:
-            if not monthly_status[section]: continue
+            if not monthly_status.get(section):
+                continue
             section_total = sum(monthly_status[section].values())
-            
-            report += f"\n--- {section.upper()} EXPENSES ---\n"
-            for cat, val in sorted(monthly_status[section].items(), key=lambda i: i[1], reverse=True):
-                report += f" • {cat}: {val:.2f} PLN\n"
-            report += f"Total for {section}: {section_total:.2f} PLN\n"
-        
-        budget_limit = self.get_budget()
-        report += f"\n----------------------------------------\n"
-        report += f"TOTAL EXPENSES: {month_total:.2f} PLN\n"
-        
-        if budget_limit and selected_month != "All": 
-            report += f"Your monthly budget: {budget_limit:.2f} PLN\n"
-            if month_total <= budget_limit:
-                report += f"STATUS: You have {budget_limit - month_total:.2f} PLN left.\n"
-            else:
-                report += f"STATUS: [WARNING] OVER BUDGET BY {month_total - budget_limit:.2f} PLN!\n"
+            self.summary_content_col.controls.append(
+                self._section_card(
+                    section,
+                    section_colors.get(section, ft.Colors.GREY_400),
+                    list(monthly_status[section].items()),
+                    section_total,
+                )
+            )
 
-        self.summary_text.value = report
+        total_card = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[
+                            ft.Text("Total expenses", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text(f"{month_total:.2f} PLN", size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.PRIMARY),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            ),
+            padding=20,
+            border_radius=8,
+            bgcolor=ft.Colors.SURFACE_CONTAINER_HIGH,
+            border=ft.border.all(1, ft.Colors.OUTLINE_VARIANT),
+        )
+        self.summary_content_col.controls.append(total_card)
+
+        budget_limit = self.get_budget()
+        if budget_limit is not None and selected_month != "All":
+            left = budget_limit - month_total
+            if month_total <= budget_limit:
+                status_text = f"You have {left:.2f} PLN left."
+                status_color = ft.Colors.GREEN_400
+            else:
+                status_text = f"Over budget by {abs(left):.2f} PLN."
+                status_color = ft.Colors.RED_400
+            self.summary_content_col.controls.append(
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Text(f"Budget: {budget_limit:.2f} PLN", size=14),
+                            ft.Text(status_text, size=14, weight=ft.FontWeight.W_500, color=status_color),
+                        ],
+                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    ),
+                    padding=12,
+                    border_radius=8,
+                    bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
+                )
+            )
+
         self.page.update()
 
     # ==========================================
@@ -637,35 +799,141 @@ class ExpenseManagerApp:
         inner = ft.Column(
             controls=[
                 ft.Text("Analytics", size=26, weight=ft.FontWeight.BOLD),
+                ft.Text("Expenses by category", size=14, color=ft.Colors.GREY_400),
                 ft.Container(height=16),
                 self.analysis_filter,
                 ft.Container(height=20),
                 self.chart_container,
             ],
             expand=True,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            width=CARD_MAX_WIDTH,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+            width=LIST_MAX_WIDTH,
         )
-        self.analytics_frame.content = _card(inner)
+        self.analytics_frame.content = _card(inner, width=LIST_MAX_WIDTH)
 
     def draw_chart(self, e=None):
-        # 1. Czyścimy kontener na wykres
         self.chart_container.content = None
-        
-        # 2. Pobieramy dane z chmury
         lines = self.read_sheet_lines()
-        
-        # 3. Hamulec bezpieczeństwa (TO ZOSTAWIAMY)
+
         if not lines:
-            self.chart_container.content = ft.Text("No data to display in cloud.", size=16)
+            self.chart_container.content = ft.Container(
+                content=ft.Text("No expenses yet. Add some in the Add tab.", size=16, color=ft.Colors.GREY_500),
+                alignment=ft.Alignment.CENTER,
+                padding=32,
+            )
             self.page.update()
             return
 
-        # 4. Informacja dla Ciebie, że wykresy są chwilowo wyłączone
-        self.chart_container.content = ft.Text(
-            "Pie Charts are temporarily disabled to fix import issues.\n"
-            "Your cloud data is safe! Check 'Summary' for totals.",
-            size=16, color=ft.Colors.GREY_500
+        # Get filter: All / Shared / Bartek / Karolina
+        selected = getattr(self.analysis_filter, "selected", ["All"])
+        filter_val = selected[0] if isinstance(selected, list) and selected else "All"
+
+        # Filter rows
+        filtered = []
+        for row in lines:
+            try:
+                if filter_val == "All":
+                    filtered.append(row)
+                elif filter_val == "Shared":
+                    if str(row.get("Shared")) == "True":
+                        filtered.append(row)
+                else:
+                    if str(row.get("Payer")) == filter_val:
+                        filtered.append(row)
+            except Exception:
+                continue
+
+        if not filtered:
+            self.chart_container.content = ft.Container(
+                content=ft.Text(f"No expenses for '{filter_val}'. Try another filter.", size=16, color=ft.Colors.GREY_500),
+                alignment=ft.Alignment.CENTER,
+                padding=32,
+            )
+            self.page.update()
+            return
+
+        # Aggregate by category
+        by_cat = {}
+        total = 0.0
+        for row in filtered:
+            try:
+                cat = str(row.get("Category", "Other"))
+                amount = float(row.get("Amount", 0))
+                by_cat[cat] = by_cat.get(cat, 0) + amount
+                total += amount
+            except Exception:
+                continue
+
+        if total <= 0:
+            self.chart_container.content = ft.Container(
+                content=ft.Text("No amounts to display.", size=16, color=ft.Colors.GREY_500),
+                alignment=ft.Alignment.CENTER,
+                padding=32,
+            )
+            self.page.update()
+            return
+
+        # Sort by amount descending
+        sorted_cats = sorted(by_cat.items(), key=lambda x: x[1], reverse=True)
+        max_bar_width = 280
+
+        title_row = ft.Row(
+            controls=[
+                ft.Text("Category", size=14, weight=ft.FontWeight.W_600, width=120),
+                ft.Text("Amount", size=14, weight=ft.FontWeight.W_600, width=90),
+                ft.Text("Share", size=14, weight=ft.FontWeight.W_600, width=60),
+            ],
+            spacing=8,
+        )
+        rows_ui = [ft.Container(height=8), title_row, ft.Divider(height=1), ft.Container(height=8)]
+
+        for i, (cat, amount) in enumerate(sorted_cats):
+            pct = (amount / total) * 100
+            bar_width = max(4, (amount / total) * max_bar_width)
+            color = CHART_COLORS[i % len(CHART_COLORS)]
+            bar = ft.Container(
+                width=bar_width,
+                height=22,
+                border_radius=4,
+                bgcolor=color,
+            )
+            rows_ui.append(
+                ft.Row(
+                    controls=[
+                        ft.Text(cat, size=13, width=120, overflow=ft.TextOverflow.ELLIPSIS),
+                        ft.Text(f"{amount:.2f} PLN", size=13, width=90),
+                        ft.Text(f"{pct:.1f}%", size=12, color=ft.Colors.GREY_400, width=44),
+                        bar,
+                    ],
+                    spacing=8,
+                    alignment=ft.MainAxisAlignment.START,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                )
+            )
+            rows_ui.append(ft.Container(height=4))
+
+        total_row = ft.Column(
+            controls=[
+                ft.Divider(height=1),
+                ft.Container(height=8),
+                ft.Row(
+                    controls=[
+                        ft.Text("Total", size=14, weight=ft.FontWeight.BOLD, width=120),
+                        ft.Text(f"{total:.2f} PLN", size=14, weight=ft.FontWeight.BOLD, width=90),
+                        ft.Text("100%", size=12, weight=ft.FontWeight.W_500, width=60),
+                    ],
+                    spacing=8,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+        )
+        rows_ui.append(total_row)
+
+        self.chart_container.content = ft.Column(
+            controls=rows_ui,
+            scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.START,
+            expand=True,
         )
         self.page.update()
 
@@ -745,15 +1013,19 @@ class ExpenseManagerApp:
         self.current_budget_lbl.value = f"Current monthly budget: {limit:.2f} PLN" if limit else "You haven't set a budget yet."
 
     def save_budget(self, e):
+        if self.budget_sheet is None:
+            self.show_message("Not connected to Google Sheets.", is_error=True)
+            self.page.update()
+            return
         try:
-            limit = float(self.budget_entry.value.replace(",", "."))
+            limit = float((self.budget_entry.value or "").replace(",", "."))
             self.budget_sheet.update_acell("B1", limit)
-            self.show_message("Budget updated successfully!")
             self.budget_entry.value = ""
             self.refresh_budget_view()
-            self.page.update()
-        except Exception: 
-            self.show_message("Budget must be a number!", is_error=True)
+            self.show_message("Budget updated successfully!")
+        except ValueError:
+            self.show_message("Budget must be a number.", is_error=True)
+        self.page.update()
 
 def main_app(page: ft.Page):
     app = ExpenseManagerApp(page)
